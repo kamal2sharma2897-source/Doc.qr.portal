@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Document QR Register</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
@@ -212,6 +214,13 @@
     <div class="panel-inner">
       <h2>New Entry</h2>
 
+      <div id="folder-connect-box" style="border:1px solid var(--line); background:var(--paper); padding:12px; margin-bottom:16px; border-radius:2px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+          <span id="folder-status" style="font-size:12px; color:var(--slate);">Auto-save to a folder on this computer: OFF</span>
+          <button id="connect-folder-btn" type="button" style="font-family:'Inter',sans-serif; font-weight:600; font-size:11.5px; padding:7px 12px; border:1px solid var(--navy); background:#fff; color:var(--navy); cursor:pointer; border-radius:2px;">Connect Folder</button>
+        </div>
+      </div>
+
       <div class="mode-toggle">
         <button id="mode-link-btn" class="active" type="button">Paste Link</button>
         <button id="mode-photo-btn" type="button">Upload Photo</button>
@@ -275,7 +284,12 @@
 
   <section class="panel register">
     <div class="panel-inner">
-      <h2>Saved Documents (<span id="entry-count">0</span>)</h2>
+      <h2>Saved Documents (<span id="entry-count">0</span>)
+        <span style="display:flex; gap:8px;">
+          <button id="export-excel-btn" style="font-family:'Inter',sans-serif; font-weight:600; font-size:11.5px; padding:7px 12px; border:1px solid var(--navy); background:#fff; color:var(--navy); cursor:pointer; border-radius:2px; text-transform:none; letter-spacing:0;">Export to Excel</button>
+          <button id="download-all-btn" style="font-family:'Inter',sans-serif; font-weight:600; font-size:11.5px; padding:7px 12px; border:1px solid var(--navy); background:var(--navy); color:#fff; cursor:pointer; border-radius:2px; text-transform:none; letter-spacing:0;">Download All (ZIP)</button>
+        </span>
+      </h2>
       <div class="search-row">
         <input type="search" id="search-input" placeholder="Document ka naam search karo...">
         <div class="result-count" id="result-count"></div>
@@ -318,6 +332,7 @@ let counter = 0;
 let selectedType = "Other";
 let currentMode = "link";
 let pendingPhotoDataUrl = null;
+let folderHandle = null;
 const yearNow = new Date().getFullYear();
 const STORAGE_KEY = 'doc-register';
 
@@ -423,6 +438,57 @@ if(viewId){
   function padNum(n){ return String(n).padStart(3,'0'); }
   function makeRegNo(){ counter++; return `QR/${yearNow}/${padNum(counter)}`; }
 
+  function sanitizeFilename(str){
+    return str.replace(/[\/\\:*?"<>|]/g, '-').slice(0, 80);
+  }
+
+  const connectFolderBtn = document.getElementById('connect-folder-btn');
+  const folderStatusEl = document.getElementById('folder-status');
+
+  connectFolderBtn.addEventListener('click', async ()=>{
+    if(!('showDirectoryPicker' in window)){
+      showToast('This browser does not support folder auto-save. Use Export or ZIP instead.');
+      return;
+    }
+    try{
+      folderHandle = await window.showDirectoryPicker();
+      folderStatusEl.textContent = `Auto-save to a folder on this computer: ON (${folderHandle.name})`;
+      connectFolderBtn.textContent = 'Reconnect Folder';
+      await writeRegisterFile();
+      showToast('Folder connected. New documents will auto-save here.');
+    }catch(err){
+      // user cancelled the picker - do nothing
+    }
+  });
+
+  async function writeRegisterFile(){
+    if(!folderHandle) return;
+    try{
+      const fileHandle = await folderHandle.getFileHandle('document-register.json', { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(JSON.stringify(entries, null, 2));
+      await writable.close();
+    }catch(err){
+      showToast('Could not write to folder - check permission');
+    }
+  }
+
+  async function writePhotoFile(entry, dataUrl){
+    if(!folderHandle || !dataUrl) return;
+    try{
+      const safeName = sanitizeFilename(`${entry.regNo}_${entry.label}_${entry.date}`) + '.jpg';
+      const fileHandle = await folderHandle.getFileHandle(safeName, { create: true });
+      const writable = await fileHandle.createWritable();
+      const res = await fetch(dataUrl);
+      const blob = await res.blob();
+      await writable.write(blob);
+      await writable.close();
+    }catch(err){
+      showToast('Could not save photo to folder');
+    }
+  }
+
+
   function renderQR(containerEl, text, size){
     containerEl.innerHTML = "";
     new QRCode(containerEl, {
@@ -494,6 +560,7 @@ if(viewId){
       showResult(entry);
       renderLog();
       await saveEntries();
+      await writeRegisterFile();
       linkInput.value = "";
       labelInput.value = "";
       genBtn.disabled = false; genBtn.textContent = 'Save Document & Generate QR';
@@ -526,6 +593,8 @@ if(viewId){
       showResult(entry);
       renderLog();
       await saveEntries();
+      await writeRegisterFile();
+      await writePhotoFile(entry, pendingPhotoDataUrl);
 
       pendingPhotoDataUrl = null;
       photoInput.value = '';
@@ -609,10 +678,128 @@ if(viewId){
         entries.splice(idx,1);
         renderLog();
         await saveEntries();
+        await writeRegisterFile();
         showToast('Document deleted');
       });
     });
   }
+
+  document.getElementById('export-excel-btn').addEventListener('click', async ()=>{
+    if(entries.length === 0){
+      showToast('No documents to export yet');
+      return;
+    }
+    showToast('Preparing Excel file...');
+
+    let hiddenDiv = document.getElementById('hidden-qr-render');
+    if(!hiddenDiv){
+      hiddenDiv = document.createElement('div');
+      hiddenDiv.id = 'hidden-qr-render';
+      hiddenDiv.style.position = 'fixed';
+      hiddenDiv.style.left = '-9999px';
+      document.body.appendChild(hiddenDiv);
+    }
+
+    try{
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Documents');
+      sheet.columns = [
+        { header: 'Register No.', key: 'regNo', width: 16 },
+        { header: 'Document Name', key: 'label', width: 34 },
+        { header: 'Type', key: 'type', width: 12 },
+        { header: 'Date', key: 'date', width: 12 },
+        { header: 'Link', key: 'link', width: 55 },
+        { header: 'QR Code', key: 'qr', width: 14 }
+      ];
+      sheet.getRow(1).font = { bold: true };
+
+      entries.forEach((e, i)=>{
+        const row = sheet.addRow({ regNo: e.regNo, label: e.label, type: e.type, date: e.date, link: e.link });
+        row.height = 60;
+
+        hiddenDiv.innerHTML = '';
+        renderQR(hiddenDiv, e.link, 100);
+        const imgEl = hiddenDiv.querySelector('img') || hiddenDiv.querySelector('canvas');
+        let base64 = '';
+        if(imgEl){
+          base64 = imgEl.tagName === 'IMG' ? imgEl.src.split(',')[1] : imgEl.toDataURL('image/png').split(',')[1];
+        }
+        if(base64){
+          const imgId = workbook.addImage({ base64, extension: 'png' });
+          sheet.addImage(imgId, {
+            tl: { col: 5, row: row.number - 1 },
+            ext: { width: 55, height: 55 }
+          });
+        }
+      });
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const dateStamp = new Date().toISOString().slice(0,10);
+      a.href = url;
+      a.download = `document-register-${dateStamp}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Excel file downloaded');
+    }catch(err){
+      showToast('Excel export failed, try again');
+    }
+  });
+
+  document.getElementById('download-all-btn').addEventListener('click', async ()=>{
+    if(entries.length === 0){
+      showToast('No documents saved yet');
+      return;
+    }
+    showToast('Preparing ZIP file...');
+    try{
+      const zip = new JSZip();
+      const folder = zip.folder('documents');
+
+      for(const e of entries){
+        const safeName = sanitizeFilename(`${e.regNo}_${e.label}_${e.date}`);
+        let savedAsFile = false;
+        if(e.type === 'Photo'){
+          try{
+            const urlObj = new URL(e.link);
+            const photoId = urlObj.searchParams.get('doc');
+            if(photoId){
+              const result = await window.storage.get('photo:' + photoId, true);
+              if(result && result.value){
+                const data = JSON.parse(result.value);
+                const base64 = data.dataUrl.split(',')[1];
+                folder.file(`${safeName}.jpg`, base64, { base64: true });
+                savedAsFile = true;
+              }
+            }
+          }catch(err){ /* fall through to link file below */ }
+        }
+        if(!savedAsFile){
+          folder.file(`${safeName}.txt`, `Document: ${e.label}\nType: ${e.type}\nDate: ${e.date}\nLink: ${e.link}\n`);
+        }
+      }
+
+      let csv = 'Register No,Document Name,Type,Date,Link\n';
+      entries.forEach(e=>{
+        csv += `"${e.regNo}","${e.label.replace(/"/g,'""')}","${e.type}","${e.date}","${e.link}"\n`;
+      });
+      zip.file('register-summary.csv', csv);
+
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const dateStamp = new Date().toISOString().slice(0,10);
+      a.href = url;
+      a.download = `document-register-${dateStamp}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('ZIP downloaded');
+    }catch(err){
+      showToast('Download failed, try again');
+    }
+  });
 
   document.getElementById('search-input').addEventListener('input', renderLog);
 
