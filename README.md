@@ -223,7 +223,7 @@
 
       <div class="mode-toggle">
         <button id="mode-link-btn" class="active" type="button">Paste Link</button>
-        <button id="mode-photo-btn" type="button">Upload Photo</button>
+        <button id="mode-photo-btn" type="button">Upload File</button>
       </div>
 
       <div id="link-mode-fields">
@@ -232,14 +232,18 @@
       </div>
 
       <div id="photo-mode-fields" style="display:none;">
-        <label>Photo</label>
-        <input type="file" id="photo-input" accept="image/*" style="display:none;">
+        <label>File (photo, PDF, Word, etc.)</label>
+        <input type="file" id="photo-input" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx" style="display:none;">
         <div class="upload-zone" id="upload-zone">
           <div id="upload-zone-empty">
-            <div class="glyph">&#128247;</div>
-            <p>Tap karke photo chuno (camera ya gallery se)</p>
+            <div class="glyph">&#128206;</div>
+            <p>Tap karke apne computer/phone se file chuno (photo, PDF, Word, koi bhi)</p>
           </div>
           <img id="upload-preview" class="upload-preview" style="display:none;">
+          <div id="upload-preview-file" style="display:none; text-align:center;">
+            <div style="font-size:30px;">&#128196;</div>
+            <div id="upload-preview-filename" style="font-size:12.5px; color:var(--navy); font-weight:600; margin-top:6px; word-break:break-all;"></div>
+          </div>
         </div>
         <p class="hint warn" id="upload-status"></p>
       </div>
@@ -349,10 +353,25 @@ async function initViewer(id){
     const result = await window.storage.get('photo:' + id, true);
     if(result && result.value){
       const data = JSON.parse(result.value);
+      const ext = (data.ext || 'jpg').toLowerCase();
+      const isImage = ['jpg','jpeg','png','gif','webp'].includes(ext);
+      const safeLabel = (data.label || 'document').replace(/[^a-z0-9 _-]/gi, '');
+      let bodyHtml;
+      if(isImage){
+        bodyHtml = `<img src="${data.dataUrl}" alt="${data.label || 'document'}">`;
+      }else{
+        bodyHtml = `
+          <div style="font-size:44px; margin-top:14px;">&#128196;</div>
+          <p style="font-size:13px; color:var(--slate); margin:10px 0 16px;">${ext.toUpperCase()} file</p>
+          <a href="${data.dataUrl}" download="${safeLabel}.${ext}"
+             style="display:inline-block; padding:11px 22px; background:var(--navy); color:#fff; text-decoration:none; font-family:'Inter',sans-serif; font-weight:600; border-radius:2px;">
+             Download File
+          </a>`;
+      }
       content.innerHTML = `
         <div class="reg-no">${data.regNo || ''}</div>
         <h2>${data.label || 'Shared Document'}</h2>
-        <img src="${data.dataUrl}" alt="${data.label || 'document'}">
+        ${bodyHtml}
       `;
     }else{
       content.innerHTML = `<p style="color:var(--slate);">Ye document nahi mila. Link expire ho gaya ya delete kar diya gaya hai.</p>`;
@@ -391,22 +410,69 @@ if(viewId){
   const photoInput = document.getElementById('photo-input');
   uploadZone.addEventListener('click', ()=> photoInput.click());
 
+  let pendingFileName = null;
+  let pendingFileExt = 'jpg';
+  const MAX_FILE_BYTES = 4 * 1024 * 1024; // safe margin under the 5MB storage cap
+
+  function readFileAsDataUrl(file){
+    return new Promise((resolve, reject)=>{
+      const reader = new FileReader();
+      reader.onload = (e)=> resolve(e.target.result);
+      reader.onerror = ()=> reject(new Error('file could not be read'));
+      reader.readAsDataURL(file);
+    });
+  }
+
   photoInput.addEventListener('change', async ()=>{
     const file = photoInput.files[0];
     if(!file) return;
     const statusEl = document.getElementById('upload-status');
-    statusEl.textContent = 'Photo process ho rahi hai...';
+    const isImage = file.type.startsWith('image/');
+
+    document.getElementById('upload-preview').style.display = 'none';
+    document.getElementById('upload-preview-file').style.display = 'none';
+
+    if(isImage){
+      statusEl.textContent = 'Photo process ho rahi hai...';
+      try{
+        const dataUrl = await compressImageAdaptive(file);
+        pendingPhotoDataUrl = dataUrl;
+        pendingFileName = file.name;
+        pendingFileExt = 'jpg';
+        document.getElementById('upload-preview').src = dataUrl;
+        document.getElementById('upload-preview').style.display = 'block';
+        document.getElementById('upload-zone-empty').style.display = 'none';
+        uploadZone.classList.add('has-photo');
+        const sizeKb = Math.round((dataUrl.length * 0.75) / 1024);
+        statusEl.textContent = `Ready (~${sizeKb} KB)`;
+      }catch(err){
+        statusEl.textContent = 'Photo load nahi ho payi: ' + (err && err.message ? err.message : 'dobara try karo.');
+      }
+      return;
+    }
+
+    // Non-image file (PDF, Word, Excel, etc.)
+    if(file.size > MAX_FILE_BYTES){
+      const sizeMb = (file.size / (1024*1024)).toFixed(1);
+      statusEl.textContent = `Ye file bahut badi hai (${sizeMb}MB). Is tarah ki badi file ke liye "Paste Link" mode use karo — file ko Google Drive/OneDrive par upload karke uska link daalo, size ki koi limit nahi lagegi.`;
+      pendingPhotoDataUrl = null;
+      return;
+    }
+
+    statusEl.textContent = 'File process ho rahi hai...';
     try{
-      const dataUrl = await compressImage(file, 1000, 0.72);
+      const dataUrl = await readFileAsDataUrl(file);
       pendingPhotoDataUrl = dataUrl;
-      document.getElementById('upload-preview').src = dataUrl;
-      document.getElementById('upload-preview').style.display = 'block';
+      pendingFileName = file.name;
+      pendingFileExt = (file.name.split('.').pop() || 'pdf').toLowerCase();
+      document.getElementById('upload-preview-filename').textContent = file.name;
+      document.getElementById('upload-preview-file').style.display = 'block';
       document.getElementById('upload-zone-empty').style.display = 'none';
       uploadZone.classList.add('has-photo');
-      const sizeKb = Math.round((dataUrl.length * 0.75) / 1024);
+      const sizeKb = Math.round(file.size / 1024);
       statusEl.textContent = `Ready (~${sizeKb} KB)`;
     }catch(err){
-      statusEl.textContent = 'Photo load nahi ho payi, dobara try karo.';
+      statusEl.textContent = 'File load nahi ho payi: ' + (err && err.message ? err.message : 'dobara try karo.');
     }
   });
 
@@ -427,12 +493,37 @@ if(viewId){
           ctx.drawImage(img, 0, 0, w, h);
           resolve(canvas.toDataURL('image/jpeg', quality));
         };
-        img.onerror = reject;
+        img.onerror = ()=> reject(new Error('image could not be read (unsupported format?)'));
         img.src = e.target.result;
       };
-      reader.onerror = reject;
+      reader.onerror = ()=> reject(new Error('file could not be read'));
       reader.readAsDataURL(file);
     });
+  }
+
+  // Tries progressively smaller size/quality until the result comfortably fits
+  // inside the storage size limit (aim for well under 1.4MB of base64 text).
+  async function compressImageAdaptive(file){
+    const steps = [
+      { maxDim: 1000, quality: 0.7 },
+      { maxDim: 800,  quality: 0.6 },
+      { maxDim: 700,  quality: 0.5 },
+      { maxDim: 600,  quality: 0.4 },
+      { maxDim: 500,  quality: 0.35 },
+      { maxDim: 400,  quality: 0.3 }
+    ];
+    const TARGET_BYTES = 1.4 * 1024 * 1024;
+    let lastResult = null;
+    for(const step of steps){
+      lastResult = await compressImage(file, step.maxDim, step.quality);
+      const approxBytes = lastResult.length * 0.75;
+      if(approxBytes <= TARGET_BYTES){
+        return lastResult;
+      }
+    }
+    // Even the smallest step is still large - return it anyway, the save step
+    // will report a clear error if the storage layer rejects it.
+    return lastResult;
   }
 
   function padNum(n){ return String(n).padStart(3,'0'); }
@@ -473,10 +564,10 @@ if(viewId){
     }
   }
 
-  async function writePhotoFile(entry, dataUrl){
+  async function writePhotoFile(entry, dataUrl, ext){
     if(!folderHandle || !dataUrl) return;
     try{
-      const safeName = sanitizeFilename(`${entry.regNo}_${entry.label}_${entry.date}`) + '.jpg';
+      const safeName = sanitizeFilename(`${entry.regNo}_${entry.label}_${entry.date}`) + '.' + (ext || 'jpg');
       const fileHandle = await folderHandle.getFileHandle(safeName, { create: true });
       const writable = await fileHandle.createWritable();
       const res = await fetch(dataUrl);
@@ -484,7 +575,7 @@ if(viewId){
       await writable.write(blob);
       await writable.close();
     }catch(err){
-      showToast('Could not save photo to folder');
+      showToast('Could not save file to folder');
     }
   }
 
@@ -568,43 +659,47 @@ if(viewId){
 
     } else {
       if(!pendingPhotoDataUrl){
-        document.getElementById('upload-status').textContent = 'Pehle koi photo chuno.';
+        document.getElementById('upload-status').textContent = 'Pehle koi file chuno.';
         return;
       }
-      if(!label) label = "Untitled Photo";
+      if(!label) label = "Untitled File";
 
       genBtn.disabled = true; genBtn.textContent = 'Uploading...';
       const regNo = makeRegNo();
       const photoId = 'p' + Date.now() + Math.random().toString(36).slice(2,8);
+      const fileExt = pendingFileExt || 'jpg';
+      const entryType = fileExt === 'jpg' || fileExt === 'jpeg' || fileExt === 'png' ? 'Photo' : 'File';
       try{
         await window.storage.set('photo:' + photoId, JSON.stringify({
-          dataUrl: pendingPhotoDataUrl, label, regNo
+          dataUrl: pendingPhotoDataUrl, label, regNo, ext: fileExt
         }), true);
       }catch(err){
-        showToast('Photo upload fail ho gayi, dobara try karo.');
+        showToast('Upload fail ho gaya: ' + (err && err.message ? err.message : 'unknown error, dobara try karo'));
         genBtn.disabled = false; genBtn.textContent = 'Save Document & Generate QR';
         counter--;
         return;
       }
 
       const shareLink = window.location.origin + window.location.pathname + '?doc=' + photoId;
-      const entry = { regNo, link: shareLink, label, type: 'Photo', date: new Date().toLocaleDateString('en-IN') };
+      const entry = { regNo, link: shareLink, label, type: entryType, ext: fileExt, date: new Date().toLocaleDateString('en-IN') };
       entries.unshift(entry);
       showResult(entry);
       renderLog();
       await saveEntries();
       await writeRegisterFile();
-      await writePhotoFile(entry, pendingPhotoDataUrl);
+      await writePhotoFile(entry, pendingPhotoDataUrl, pendingFileExt);
 
       pendingPhotoDataUrl = null;
+      pendingFileName = null;
       photoInput.value = '';
       document.getElementById('upload-preview').style.display = 'none';
+      document.getElementById('upload-preview-file').style.display = 'none';
       document.getElementById('upload-zone-empty').style.display = 'block';
       uploadZone.classList.remove('has-photo');
       document.getElementById('upload-status').textContent = '';
       labelInput.value = "";
       genBtn.disabled = false; genBtn.textContent = 'Save Document & Generate QR';
-      showToast('Photo saved: ' + regNo);
+      showToast('File saved: ' + regNo);
     }
   });
 
@@ -761,7 +856,7 @@ if(viewId){
       for(const e of entries){
         const safeName = sanitizeFilename(`${e.regNo}_${e.label}_${e.date}`);
         let savedAsFile = false;
-        if(e.type === 'Photo'){
+        if(e.type === 'Photo' || e.type === 'File'){
           try{
             const urlObj = new URL(e.link);
             const photoId = urlObj.searchParams.get('doc');
@@ -770,7 +865,8 @@ if(viewId){
               if(result && result.value){
                 const data = JSON.parse(result.value);
                 const base64 = data.dataUrl.split(',')[1];
-                folder.file(`${safeName}.jpg`, base64, { base64: true });
+                const ext = data.ext || e.ext || 'jpg';
+                folder.file(`${safeName}.${ext}`, base64, { base64: true });
                 savedAsFile = true;
               }
             }
