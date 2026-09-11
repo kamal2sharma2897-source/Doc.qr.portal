@@ -246,6 +246,15 @@
           </div>
         </div>
         <p class="hint warn" id="upload-status"></p>
+
+        <div id="generated-link-box" style="display:none; margin-top:14px;">
+          <label>Generated Link</label>
+          <div style="display:flex; gap:8px;">
+            <input type="text" id="generated-link-field" readonly style="flex:1;">
+            <button id="copy-generated-link-btn" type="button" style="font-family:'Inter',sans-serif; font-weight:600; font-size:12px; padding:0 14px; border:1px solid var(--navy); background:#fff; color:var(--navy); cursor:pointer; border-radius:2px;">Copy</button>
+          </div>
+          <p class="hint">Ye link file save hone ke baad kaam karega. Save button dabao taaki QR bhi ban jaye.</p>
+        </div>
       </div>
 
       <label for="doc-label">Document Name / Description</label>
@@ -412,7 +421,26 @@ if(viewId){
 
   let pendingFileName = null;
   let pendingFileExt = 'jpg';
-  const MAX_FILE_BYTES = 4 * 1024 * 1024; // safe margin under the 5MB storage cap
+  let pendingFileId = null;
+
+  function showGeneratedLinkPreview(){
+    pendingFileId = 'p' + Date.now() + Math.random().toString(36).slice(2,8);
+    const link = window.location.origin + window.location.pathname + '?doc=' + pendingFileId;
+    document.getElementById('generated-link-field').value = link;
+    document.getElementById('generated-link-box').style.display = 'block';
+  }
+
+  document.getElementById('copy-generated-link-btn').addEventListener('click', async ()=>{
+    const field = document.getElementById('generated-link-field');
+    if(!field.value) return;
+    try{
+      await navigator.clipboard.writeText(field.value);
+      showToast('Link copied to clipboard');
+    }catch(err){
+      showToast('Could not copy link');
+    }
+  });
+  const MAX_FILE_BYTES = 2.5 * 1024 * 1024; // raw size cap - base64 + JSON wrapper inflates this by ~35-40%, staying safely under the 5MB storage cap
 
   function readFileAsDataUrl(file){
     return new Promise((resolve, reject)=>{
@@ -431,6 +459,8 @@ if(viewId){
 
     document.getElementById('upload-preview').style.display = 'none';
     document.getElementById('upload-preview-file').style.display = 'none';
+    document.getElementById('generated-link-box').style.display = 'none';
+    pendingFileId = null;
 
     if(isImage){
       statusEl.textContent = 'Photo process ho rahi hai...';
@@ -445,6 +475,7 @@ if(viewId){
         uploadZone.classList.add('has-photo');
         const sizeKb = Math.round((dataUrl.length * 0.75) / 1024);
         statusEl.textContent = `Ready (~${sizeKb} KB)`;
+        showGeneratedLinkPreview();
       }catch(err){
         statusEl.textContent = 'Photo load nahi ho payi: ' + (err && err.message ? err.message : 'dobara try karo.');
       }
@@ -471,6 +502,7 @@ if(viewId){
       uploadZone.classList.add('has-photo');
       const sizeKb = Math.round(file.size / 1024);
       statusEl.textContent = `Ready (~${sizeKb} KB)`;
+      showGeneratedLinkPreview();
     }catch(err){
       statusEl.textContent = 'File load nahi ho payi: ' + (err && err.message ? err.message : 'dobara try karo.');
     }
@@ -666,15 +698,39 @@ if(viewId){
 
       genBtn.disabled = true; genBtn.textContent = 'Uploading...';
       const regNo = makeRegNo();
-      const photoId = 'p' + Date.now() + Math.random().toString(36).slice(2,8);
+      const photoId = pendingFileId || ('p' + Date.now() + Math.random().toString(36).slice(2,8));
       const fileExt = pendingFileExt || 'jpg';
       const entryType = fileExt === 'jpg' || fileExt === 'jpeg' || fileExt === 'png' ? 'Photo' : 'File';
+      const payload = JSON.stringify({ dataUrl: pendingPhotoDataUrl, label, regNo, ext: fileExt });
+      const payloadMb = (payload.length / (1024*1024)).toFixed(2);
+
+      if(payload.length > 4.7 * 1024 * 1024){
+        const msg = `File abhi bhi bahut badi hai (~${payloadMb}MB). Chhoti file try karo ya "Paste Link" mode use karo.`;
+        document.getElementById('upload-status').textContent = msg;
+        showToast(msg);
+        genBtn.disabled = false; genBtn.textContent = 'Save Document & Generate QR';
+        counter--;
+        return;
+      }
+
       try{
-        await window.storage.set('photo:' + photoId, JSON.stringify({
-          dataUrl: pendingPhotoDataUrl, label, regNo, ext: fileExt
-        }), true);
+        const result = await window.storage.set('photo:' + photoId, payload, true);
+        if(!result){
+          const msg = `Upload fail ho gaya (~${payloadMb}MB file) - storage ne save nahi kiya. Dobara try karo ya chhoti file bhejo.`;
+          document.getElementById('upload-status').textContent = msg;
+          showToast(msg);
+          genBtn.disabled = false; genBtn.textContent = 'Save Document & Generate QR';
+          counter--;
+          return;
+        }
       }catch(err){
-        showToast('Upload fail ho gaya: ' + (err && err.message ? err.message : 'unknown error, dobara try karo'));
+        let detail = 'unknown error';
+        if(err){
+          detail = err.message || err.toString() || JSON.stringify(err);
+        }
+        const msg = `Upload fail ho gaya (~${payloadMb}MB): ${detail}`;
+        document.getElementById('upload-status').textContent = msg;
+        showToast(msg);
         genBtn.disabled = false; genBtn.textContent = 'Save Document & Generate QR';
         counter--;
         return;
@@ -691,10 +747,12 @@ if(viewId){
 
       pendingPhotoDataUrl = null;
       pendingFileName = null;
+      pendingFileId = null;
       photoInput.value = '';
       document.getElementById('upload-preview').style.display = 'none';
       document.getElementById('upload-preview-file').style.display = 'none';
       document.getElementById('upload-zone-empty').style.display = 'block';
+      document.getElementById('generated-link-box').style.display = 'none';
       uploadZone.classList.remove('has-photo');
       document.getElementById('upload-status').textContent = '';
       labelInput.value = "";
